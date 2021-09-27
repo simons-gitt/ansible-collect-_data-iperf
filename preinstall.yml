@@ -1,0 +1,98 @@
+---
+  - name: Checking connectivity Between nodes
+    become: yes
+    hosts: all
+    gather_facts: false
+    tasks:
+      - ping:
+
+  - name: CHECK FOR DCPMM\NVDIMM IN DUROS TARGETS
+    hosts: duros_nodes
+    gather_facts: false
+    tasks:
+    - name: verify dcpmm
+      block:
+      - name: Running command to check PMEM in duros_nodes
+        become: yes
+        become_user: root
+        register: presence
+        shell: "dmesg | tr -s ' '| grep -i pmem"
+        register: pmem_output
+      - debug:
+          msg:
+            - "Availble Persistent-Memory For node:"
+            - "{{pmem_output.stdout_lines}}"
+        failed_when: pmem_output == ''
+      when: hostvars[inventory_hostname].persistent_memory is defined and hostvars[inventory_hostname].persistent_memory | bool == True
+
+    - name: ACTIVE AVAILBLE RAM
+      shell: "vmstat -s |tr -s ' '| grep -w 'free memory'"
+      register: df_output
+    - debug: msg="Availble RAM capacity for node > {{df_output.stdout_lines}}"
+
+    - name: CHECK NUM OF NVME DEVICES in duros_nodes
+      become: yes
+      become_user: root
+      register: presence
+      shell: "lsblk | grep -o '^nvme' | wc -l"
+      register: nvme_output
+    - debug: msg="Num Of NVME Devices for node > {{nvme_output.stdout_lines}}"
+      failed_when: nvme_output == ''
+
+    - name: CHECK CONNECTIVITY to lb-repo
+      wait_for:
+        host: lbrepo01.lbits
+        port: 22
+        state: started
+        delay: 1
+        timeout: 3
+        msg: "Timeout waiting for PORT 22 to respond"
+      register: port_check
+      ignore_errors: yes
+
+  - hosts: duros_nodes
+    gather_facts: false
+    become: yes
+    become_method: sudo
+    tasks:
+    - name: install iperf
+      yum: name=iperf state=latest
+
+  - hosts: iperf_servers
+    gather_facts: false
+    remote_user: root
+    tasks:
+    - name: print server iperf
+      debug: msg="Starting Server Iperf with Data_IP > {{ hostvars[inventory_hostname].nodes[0].data_ip }}"
+    - name: start server iperf
+      shell: "iperf -B {{ hostvars[inventory_hostname].nodes[0].data_ip }} --server --one-off --daemon"
+    - name: print friendly output
+      debug: msg="Started Server IPERF On ip > {{ hostvars[inventory_hostname].nodes[0].data_ip }}"
+
+  - hosts: iperf_clients
+    remote_user: root
+    tasks: 
+    - name: print iperf server data_ip's from client
+      debug: msg="{{ hostvars[groups['iperf_servers'][0]].nodes[0].data_ip }}"
+    - name: set output base for iperf file
+      set_fact: output_base="{{ ansible_date_time.date }}_{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}_{{ hostvars[groups['iperf_servers'][0]].nodes[0].data_ip }}.out"
+    - name: set iperf out file
+      set_fact: iperf_out="iperf_{{ output_base }}"
+    - name: print friendly output
+      debug: msg="Starting IPERF > | Server ->> {{ hostvars[groups['iperf_servers'][0]].nodes[0].data_ip }} | | Client ->> {{ hostvars[inventory_hostname].nodes[0].data_ip }} | "
+    - name: Please Wait while IPERF testing is running...can take few minutes, depends on time value in the shell command...
+      shell: "iperf -B {{ hostvars[inventory_hostname].nodes[0].data_ip }} --client {{ hostvars[groups['iperf_servers'][0]].nodes[0].data_ip }} --time 60 >> {{ iperf_out }}"
+    - name: grab iperf output and generate results...
+      fetch: src={{ iperf_out }} dest=results/ flat=yes
+
+  - hosts: localhost
+    gather_facts: false
+    connection: local
+    tasks:
+    - name: stats
+      tags: stats
+      shell: "head results/iperf*.out | awk '/Gbits/ { sum += $7; n++} END { print sum / n }'"
+      register: stats
+    - name: print stats
+      tags: stats
+      debug: msg="Average iperf bandwidth {{ stats.stdout }} Gbits/s"
