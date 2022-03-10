@@ -1,0 +1,106 @@
+---
+  - name: Checking connectivity Between nodes
+    become: yes
+    hosts: all
+    gather_facts: false
+    tasks:
+      - ping:
+
+  - name: CHECK FOR DCPMM IN DUROS TARGETS
+    hosts: duros_nodes
+    gather_facts: false
+    become: yes
+    become_method: sudo
+    tasks:
+    - name: install iperf,ipmctl
+      yum: name=iperf,ipmctl state=latest
+
+    - name: verify dcpmm
+      block:
+      - name: Running command to check PMEM in duros_nodes
+        become: yes
+        become_user: root
+        shell: "dmesg | tr -s ' '| grep -i pmem"
+        register: pmem_output
+      - debug:
+          msg:
+            - "Availble Persistent-Memory For node:"
+            - "{{pmem_output.stdout_lines}}"
+
+    - name: ACTIVE AVAILBLE RAM
+      shell: >
+              free -h  | grep ^Mem | tr -s ' ' | cut -d ' ' -f 7
+      register: df_output
+    - debug: msg="Availble RAM Memory Capacity for Node ==>> {{df_output.stdout_lines}}"
+
+    - name: CHECK NUM OF NVME DEVICES in duros_nodes
+      become: yes
+      become_user: root
+      shell: "lsblk | grep -o '^nvme' | wc -l"
+      register: nvme_output
+    - debug: msg="Num Of NVME Devices for node ==>> {{nvme_output.stdout_lines}}"
+      failed_when: nvme_output == ''
+
+    - name: check NTP is Synced in duros_nodes
+      become: yes
+      become_user: root
+      shell: "ntpstat"
+      register: date_output
+    - debug: msg="Machine Time  ==>> {{date_output.stdout_lines}}"
+      failed_when: date_output == ''
+
+    - name: CHECK CONNECTIVITY to web
+      uri:
+        url: http://www.example.com/
+      ignore_errors: yes
+
+
+
+    # - name: IPMCTL commands execution
+    #   shell: "ipmctl show -region"
+    #   register: ipmctl_output
+    #   ignore_errors: yes
+    # - debug:
+    #     msg:
+    #       - "Output for: IPMCTL SHOW -dimm"
+    #       - "{{ipmctl_output.stdout_lines}}"
+
+  - hosts: iperf_servers
+    gather_facts: false
+    remote_user: root
+    tasks:
+    - name: print server iperf
+      debug: msg="Starting Server Iperf with Data_IP ==>> {{ hostvars[inventory_hostname].nodes[0].data_ip }}"
+    - name: start server iperf
+      shell: "iperf -B {{ hostvars[inventory_hostname].nodes[0].data_ip }} --server -P 16 --one-off --daemon"
+    - name: print friendly output
+      debug: msg="Started Server IPERF On ip ==>> {{ hostvars[inventory_hostname].nodes[0].data_ip }}"
+
+  - hosts: iperf_clients
+    remote_user: root
+    tasks: 
+    - name: print iperf server data_ip's from client
+      debug: msg="{{ hostvars[groups['iperf_servers'][0]].nodes[0].data_ip }}"
+    - name: set output base for iperf file
+      set_fact: output_base="{{ ansible_date_time.date }}_{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}_{{ hostvars[groups['iperf_servers'][0]].nodes[0].data_ip }}.out"
+    - name: set iperf out file
+      set_fact: iperf_out="iperf_{{ output_base }}"
+    - name: print friendly output
+      debug: msg="Starting IPERF ==> | Server ==>> {{ hostvars[groups['iperf_servers'][0]].nodes[0].data_ip }} | | Client ==>> {{ hostvars[inventory_hostname].nodes[0].data_ip }} | "
+    - name: Please Wait while IPERF testing is running...will take 120 seconds...
+      shell: "iperf -B {{ hostvars[inventory_hostname].nodes[0].data_ip }} --client {{ hostvars[groups['iperf_servers'][0]].nodes[0].data_ip }} -P 16 --time 120 -i 5 >> {{ iperf_out }}"
+    - name: grab iperf output and generate results...
+      fetch: src={{ iperf_out }} dest=results/ flat=yes
+
+  - hosts: localhost
+    gather_facts: false
+    connection: local
+    tasks:
+    - name: statsd
+      tags: stats
+      shell: >
+              tail -1 $(ls -1 -t results/* | head -1)
+      register: stats
+    - name: print stats
+      tags: stats
+      debug: msg="Average IPERF bandwidth ==>> {{ stats.stdout }} "
